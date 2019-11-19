@@ -1,0 +1,3 @@
+[submodule "fork-gpu-monitor"]
+	path = fork-gpu-monitor
+	url = https://github.com/mcrilo33/Vizir.git
