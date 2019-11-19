@@ -1,5 +1,7 @@
 import logging
 
+from datetime import datetime as dt
+from datetime import timedelta
 import dash
 import dash_core_components as dcc
 import dash_html_components as html
@@ -9,7 +11,11 @@ from dash.dependencies import Input, Output, State
 from dash.exceptions import PreventUpdate
 
 from app import app, default_columns, logic_manager
-from apps import config_viewer, datatable, plot_viewer
+from apps import config_viewer, running, datatable, plot_viewer, pareto, image_viewer, plot_trajectory
+import helpers
+
+TODAY = dt.now()
+TOMORROW = TODAY + timedelta(days=1)
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger('dashvision.index')
@@ -18,7 +24,13 @@ app.layout = html.Div([
     # Storages
     dcc.Store(id='database-dd-storage', storage_type='session'),
     dcc.Store(id='experiments-dd-storage', storage_type='session'),
+    dcc.Store(id='table-columns-storage', storage_type='session'),
     dcc.Store(id='table-selection-storage', storage_type='session'),
+    dcc.Store(id='plot-storage', storage_type='session'),
+    dcc.Store(id='x-pareto-storage', storage_type='session'),
+    dcc.Store(id='y-pareto-storage', storage_type='session'),
+    dcc.Store(id='traj-id-storage', storage_type='session'),
+    dcc.Store(id='steps-storage', storage_type='session'),
 
     # Page header
     html.Div([
@@ -37,16 +49,51 @@ app.layout = html.Div([
         html.Div('Select experiments'),
         html.Div(dcc.Dropdown(id='experiment-selector', multi=True))
     ]),
+
+    # Select dates
+    html.Div([
+        html.Div('Select dates'),
+        dcc.DatePickerRange(
+            id='date-picker-range',
+            max_date_allowed=TOMORROW,
+            initial_visible_month=dt.now(),
+            clearable=True,
+            day_size=39,
+            display_format='DD/MM/YYYY',
+            style={'padding-bottom':'5px'}
+        )
+    ]),
+
     html.Div([
         dcc.Input(
             id='add-column',
-            placeholder='Enter a column name...', ),
-    ]),
+            placeholder='Enter a column name...',
+            style={
+                'width':'90%',
+                'font-size':'100%',
+                'padding':'8px'
+            }
+
+        )],
+        style={
+            'padding':'5px 0'
+        }
+    ),
     html.Div([
         dcc.Input(
             id='add-query',
-            placeholder='Enter a query...',),
-    ]),
+            placeholder='Enter a query...',
+            style={
+                'width':'90%',
+                'font-size':'100%',
+                'padding':'8px'
+            }
+        )],
+        style={
+            'padding':'5px 0',
+            'padding-bottom': '10px'
+        }
+    ),
     # Match Table
     html.Div(
         dash_table.DataTable(id='experiment-table',
@@ -54,7 +101,7 @@ app.layout = html.Div([
                              row_selectable="multi",
                              selected_rows=[],
                              sorting=True,
-                             sorting_type="multi",                               
+                             sorting_type="multi",
                              filtering=True,
                              style_table={
                                  'maxHeight': '300',
@@ -80,14 +127,24 @@ app.layout = html.Div([
             html.H1('Views'),
             dcc.Tabs(
                 id="tabs",
-                value='tab-datatable',
+                value='tab-running',
                 children=[
+                    dcc.Tab(label='Running', value='tab-running'),
                     dcc.Tab(label='Datatable', value='tab-datatable'),
                     dcc.Tab(label='Configs', value='tab-config'),
-                    dcc.Tab(label='Graph', value='tab-graph')])],
+                    dcc.Tab(label='Graph', value='tab-graph'),
+                    dcc.Tab(label='Pareto', value='tab-pareto'),
+                    dcc.Tab(label='Trajectories', value='tab-trajectories'),
+                    dcc.Tab(label='Images', value='tab-image'),
+                ])],
         className="row"),
-    html.Div(id='tab-content', className="row")],
-    style={"margin": "2% 3%"})
+    html.Div(id='tab-content', className="row"),
+    dcc.Interval(
+        id='table-interval',
+        interval=5000,
+        n_intervals=0
+    )
+], style={"margin": "2% 3%"})
 
 
 @app.callback([Output('database-selector', 'value'),
@@ -96,14 +153,13 @@ app.layout = html.Div([
               [State('database-selector', 'options'),
                State('database-dd-storage', 'data')])
 def select_or_load_db(ts, db_options, stored_db_name):
-
-    if ts is None or stored_db_name is None:
-        # stored data doesn't exists or isn't loaded yet.
+    if ts is None:
+        # Stored data isn't loaded yet.
         raise PreventUpdate
 
-    db_option_names = {itm['value'] for itm in db_options}
-    if stored_db_name is None or stored_db_name not in db_option_names:
-        raise PreventUpdate
+    if stored_db_name is None or not helpers.selection_in_options(stored_db_name, db_options):
+        # Stored database is not an available option
+        return None, []
 
     exps_selector_options = logic_manager.experiment_options(stored_db_name)
     return stored_db_name, exps_selector_options
@@ -118,29 +174,28 @@ def select_database(selected_value, ts):
     """
     if ts is None:
         raise PreventUpdate
-
     return selected_value
 
 
 @app.callback(Output('experiment-selector', 'value'),
               [Input('experiment-selector', 'options')],
-              [State('experiments-dd-storage', 'data')])
-def init_experiments(exp_options, stored_experiments):
-    if stored_experiments is None:
+              [State('experiments-dd-storage', 'data'),
+               State('experiments-dd-storage', 'modified_timestamp')])
+def init_experiments(exp_options, stored_experiments, ts):
+    if ts is None:
         raise PreventUpdate
 
-    db_option_names = {itm['value'] for itm in exp_options}
-    if all(map(lambda item: item in db_option_names, stored_experiments)):
+    if helpers.selection_in_options(stored_experiments, exp_options):
         return stored_experiments
-    else:
-        # At least one selected experiment isn't in the options
-        raise PreventUpdate
+
+    return None
+
 
 @app.callback(Output('experiments-dd-storage', 'data'),
               [Input('experiment-selector', 'value')],
                # Input('table-selection-storage', 'data')],
               [State('experiments-dd-storage', 'modified_timestamp')])
-def select_experiement(selected_value, ts):
+def select_experiment(selected_value, ts):
     """
     Stores the experiments selected by the user in the session storage.
     """
@@ -152,20 +207,38 @@ def select_experiement(selected_value, ts):
 
 @app.callback(Output('experiment-table', 'data'),
               [Input('experiment-selector', 'value'),
-               Input('experiment-table', 'columns'),
+               Input('table-columns-storage', 'data'),
                Input('add-query', 'n_submit'),
-               Input('database-selector', 'value')],
+               Input('database-selector', 'value'),
+               Input('table-interval', 'n_intervals'),
+               Input('date-picker-range', 'start_date'),
+               Input('date-picker-range', 'end_date'),
+               ],
               [State('add-query', 'value')])
-def update_experiment_table(experiment_names, cols, query_nsub, db_name, query):
+def update_experiment_table(experiment_names,
+                            cols,
+                            query_nsub,
+                            db_name,
+                            n,
+                            start_date,
+                            end_date,
+                            query):
     '''
     Update datatable. Program wait State arg before fire callback
      and populate the table.
     '''
+
     if db_name is None or not experiment_names:
         return []
 
     columns = [col['id'] for col in cols]
-    rows = logic_manager.table_content_from_exp_names(db_name, experiment_names, columns)
+    rows = logic_manager.table_content_from_exp_names(
+        db_name,
+        experiment_names,
+        columns,
+        start_date,
+        end_date
+    )
 
     if query_nsub is not None:
         rows = logic_manager.filter_rows_by_query(rows, query)
@@ -173,32 +246,52 @@ def update_experiment_table(experiment_names, cols, query_nsub, db_name, query):
     return rows
 
 
-@app.callback(Output('experiment-table', 'columns'),
-              [Input('add-column', 'n_submit')],
-              [State('add-column', 'value'),
-               State('experiment-table', 'columns')])
-def update_columns(n_submit, value, cols):
-    if n_submit is None:
-        return cols
+@app.callback(Output('table-columns-storage', 'data'),
+              [Input('add-column', 'n_submit'),
+               Input('experiment-table', 'columns')],
+              [State('add-column', 'value'),])
+def save_columns(n_submit, cols, value):
+    ctx = dash.callback_context
+    adding_column = any(itm['prop_id'] == 'add-column.n_submit' for itm in ctx.triggered)
 
-    if n_submit > 0:
-        cols.append({
-            'id': value, 'name': value,
-            'editable_name': True, 'deletable': True
-        })
+    if adding_column:
+        if n_submit is None:
+            raise PreventUpdate
+        if n_submit > 0:
+            cols.append({
+                'id': value, 'name': value,
+                'editable_name': True, 'deletable': True
+            })
     return cols
+
+
+@app.callback(Output('experiment-table', 'columns'),
+              [Input('table-columns-storage', 'modified_timestamp')],
+              [State('table-columns-storage', 'data'),
+               State('experiment-table', 'columns')])
+def update_columns(ts, storage_cols, cols):
+    # Use the default initial value if the storage is empty
+    return storage_cols or cols
 
 
 @app.callback(Output('tab-content', 'children'),
               [Input('tabs', 'value'),
                Input('update-selected-runs', 'n_clicks')])
 def render_content(tab, update_clicks):
-    if tab == 'tab-datatable':
+    if tab == 'tab-running':
+        return running.layout
+    elif tab == 'tab-datatable':
         return datatable.layout
     elif tab == 'tab-config':
         return config_viewer.layout
+    elif tab == 'tab-image':
+        return image_viewer.layout
     elif tab == 'tab-graph':
         return plot_viewer.layout
+    elif tab == 'tab-pareto':
+        return pareto.layout
+    elif tab == 'tab-trajectories':
+        return plot_trajectory.layout
     else:
         return html.Div('Not Found')
 
@@ -223,20 +316,35 @@ def populate_hidden(tab, update_clicks, db_name, selected_rows, table_data):
 
 @app.callback(Output('table-selection-storage', 'data'),
               [Input('experiment-table', 'selected_rows'),
-               Input('database-selector', 'value'),
                Input('experiment-selector', 'value'),
-               Input('add-query', 'n_submit')],
+               Input('add-query', 'n_submit'),
+               Input('date-picker-range', 'start_date'),
+               Input('date-picker-range', 'end_date')],
               [State('experiment-table', 'data'),
+               State('database-selector', 'value'),
                State('table-selection-storage', 'data'),
                State('add-query', 'value')])
-def reset_selected_rows(selected_rows, db_name, experiment_names, submit_query, table_data, stored_data, query_txt):
-    #todo: Reset rows only is query_txt has changed
+def reset_selected_rows(selected_rows, experiment_names, submit_query, start_date, end_date, table_data, db_name, stored_data, query_txt):
+    #todo: Reset rows only if query_txt has changed
     ctx = dash.callback_context
     is_query = any(itm['prop_id'] == 'add-query.n_submit' for itm in ctx.triggered)
+    is_query_picker = any(itm['prop_id'].find('date-picker') != -1 for itm in ctx.triggered)
 
     stored_data = stored_data or {}
-
-    if is_query or db_name != stored_data.get('db_name') or experiment_names != stored_data.get('experiment_names'):
+    logger.debug('Triggered by {}'.format(ctx.triggered))
+    if(is_query
+       or is_query_picker
+       or db_name != stored_data.get('db_name')
+       or experiment_names != stored_data.get('experiment_names')
+    ):
+        if is_query:
+            logger.debug('Reset because query')
+        elif db_name != stored_data.get('db_name'):
+            logger.debug('Reset because current db is {} and stored is {}'
+                         .format(db_name, stored_data.get('db_name')))
+        elif experiment_names != stored_data.get('experiment_names'):
+            logger.debug('Reset because current db is {} and stored is {}'
+                         .format(experiment_names, stored_data.get('experiment_names')))
         stored_data = {
             'db_name': db_name,
             'experiment_names': experiment_names,
@@ -248,13 +356,14 @@ def reset_selected_rows(selected_rows, db_name, experiment_names, submit_query, 
 
 
 @app.callback(Output('experiment-table', 'selected_rows'),
-              [Input('table-selection-storage', 'modified_timestamp')],
+              [Input('table-selection-storage', 'modified_timestamp'),
+              Input('experiment-selector', 'value')],
               [State('table-selection-storage', 'data')])
-def load_selected_rows(ts, data):
+def load_selected_rows(ts, exp_selection, data):
     if ts is None or data is None:
         raise PreventUpdate
     return data['selected_rows']
 
 
 if __name__ == '__main__':
-    app.run_server(debug=True)
+    app.run_server(debug=True, port=9050)

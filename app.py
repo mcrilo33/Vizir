@@ -14,4 +14,4 @@ app.config.suppress_callback_exceptions = True
 
 data_manager = MongoManager(server='drunk', port='27017')
 logic_manager = AppLogic(data_manager)
-default_columns = ['_id', 'status']
+default_columns = ['_id', 'start_time', 'status']

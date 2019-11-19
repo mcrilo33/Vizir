@@ -5,3 +5,4 @@ dash-table==3.6.0
 dash-daq==0.1.0
 pymongo==3.7.2
 pandas==0.23.0
+colorlover
